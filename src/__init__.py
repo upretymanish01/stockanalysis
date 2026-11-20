@@ -16,6 +16,9 @@ from .analytics import (
     analytics_for_universe,
     plot_price_and_returns,
     save_analytics_result,
+    multi_period_returns,
+    multi_period_universe,
+    plot_multi_period_returns,
 )
 
 __all__ = [
@@ -33,4 +36,7 @@ __all__ = [
     "analytics_for_universe",
     "plot_price_and_returns",
     "save_analytics_result",
+    "multi_period_returns",
+    "multi_period_universe",
+    "plot_multi_period_returns",
 ]
