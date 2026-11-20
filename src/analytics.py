@@ -2,6 +2,9 @@
 
 Combines price history, basic stats, quality metrics, and simple plots.
 Designed so results can be easily saved into analysis-results/ dated folders.
+
+Includes multi-period comparison so you can capture data once and compare
+2/3/4/5 days, 1 week, 1 month, 3 months, 6 months, and years.
 """
 
 from datetime import datetime
@@ -46,6 +49,117 @@ def get_price_analytics(ticker: str, period: str = "1y") -> Dict:
     return analytics
 
 
+def multi_period_returns(
+    ticker: str,
+    lookbacks: Optional[List[int]] = None,
+    base_period: str = "2y",
+) -> pd.DataFrame:
+    """
+    Capture price data once, then compute total returns over multiple lookback windows.
+
+    Default lookbacks (trading days):
+    - 2, 3, 4, 5 days
+    - 5 (~1 week)
+    - 21 (~1 month)
+    - 63 (~3 months)
+    - 126 (~6 months)
+    - 252 (~1 year)
+    - 504 (~2 years)
+
+    Returns a DataFrame with period label, days, start price, end price, total return.
+    """
+    if lookbacks is None:
+        lookbacks = [2, 3, 4, 5, 5, 21, 63, 126, 252, 504]
+
+    # Label mapping for readability
+    label_map = {
+        2: "2d", 3: "3d", 4: "4d", 5: "5d / 1w",
+        21: "1m", 63: "3m", 126: "6m",
+        252: "1y", 504: "2y",
+    }
+
+    df = fetch_price_history(ticker, period=base_period)
+    if df.empty or len(df) < max(lookbacks):
+        return pd.DataFrame([{"ticker": ticker, "error": "Insufficient data"}])
+
+    close = df["Close"]
+    latest = close.iloc[-1]
+    rows = []
+
+    for days in lookbacks:
+        if days >= len(close):
+            continue
+        start_price = close.iloc[-days - 1] if days < len(close) else close.iloc[0]
+        # More precise: price from N trading days ago
+        start_idx = max(0, len(close) - days - 1)
+        start_price = close.iloc[start_idx]
+        total_ret = (latest / start_price) - 1
+
+        rows.append({
+            "ticker": ticker,
+            "period_label": label_map.get(days, f"{days}d"),
+            "lookback_days": days,
+            "start_price": float(start_price),
+            "end_price": float(latest),
+            "total_return": float(total_ret),
+            "total_return_pct": round(total_ret * 100, 2),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def multi_period_universe(
+    tickers: List[str],
+    lookbacks: Optional[List[int]] = None,
+    base_period: str = "2y",
+) -> pd.DataFrame:
+    """
+    Run multi-period returns for multiple tickers.
+    Easy to compare side-by-side.
+    """
+    frames = []
+    for t in tickers:
+        frames.append(multi_period_returns(t, lookbacks, base_period))
+    return pd.concat(frames, ignore_index=True)
+
+
+def plot_multi_period_returns(
+    df: pd.DataFrame,
+    title: str = "Multi-Period Returns Comparison",
+    save_path: Optional[str] = None,
+):
+    """
+    Bar chart of total returns across periods.
+    Works for single ticker or multiple (grouped).
+    """
+    if df.empty or "error" in df.columns:
+        print("No valid data to plot")
+        return
+
+    pivot = df.pivot(index="period_label", columns="ticker", values="total_return_pct")
+    # Reorder periods if possible
+    preferred_order = ["2d", "3d", "4d", "5d / 1w", "1m", "3m", "6m", "1y", "2y"]
+    existing = [p for p in preferred_order if p in pivot.index]
+    if existing:
+        pivot = pivot.reindex(existing)
+
+    ax = pivot.plot(kind="bar", figsize=(12, 6), width=0.8)
+    ax.set_title(title)
+    ax.set_ylabel("Total Return (%)")
+    ax.set_xlabel("Period")
+    ax.legend(title="Ticker")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Plot saved to {save_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
 def plot_price_and_returns(analytics: Dict, save_path: Optional[str] = None):
     """Plot price history and cumulative returns."""
     if "error" in analytics:
@@ -82,10 +196,9 @@ def full_ticker_analytics(ticker: str, period: str = "1y") -> Dict:
     price = get_price_analytics(ticker, period)
     quality = get_quality_metrics(ticker)
 
-    # Remove the large DataFrame from the returned summary if desired
     summary = {k: v for k, v in price.items() if k != "data"}
     summary["quality"] = quality
-    summary["price_df"] = price.get("data")  # keep available if needed
+    summary["price_df"] = price.get("data")
     return summary
 
 
