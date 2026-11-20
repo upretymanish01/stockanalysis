@@ -22,20 +22,52 @@ stockanalysis/
 │   ├── __init__.py
 │   ├── data_fetcher.py
 │   ├── analysis.py
-│   ├── monte_carlo.py      # GBM path simulation + risk metrics
+│   ├── monte_carlo.py          # GBM path simulation + risk metrics
+│   ├── quality_screen.py        # Buffett/Lynch-style quality & valuation screen
+│   ├── statistical_edge.py      # simple signal / edge tester
 │   └── utils.py
-├── learning/         # ongoing notes, concepts, sessions, ideas
-│   ├── concepts/
+├── learning/                 # ongoing notes, concepts, sessions, ideas
+│   ├── concepts/               # e.g. top-investors-principles.md
 │   ├── sessions/
-│   └── ideas/
+│   ├── ideas/
+│   └── templates/              # stock-checklist.md
 ├── notebooks/
 ├── tests/
-├── data/          # sample data only (large files stay out of git)
-└── output/        # generated reports (gitignored)
+├── data/                    # sample data only (large files stay out of git)
+└── output/                  # generated reports (gitignored)
 ```
 
 ## Learning notes
-Use the `learning/` folder to keep adding notes as you study. See `learning/README.md` for the suggested structure.
+Use the `learning/` folder to keep adding notes as you study.  
+See `learning/concepts/top-investors-principles.md` for how Buffett, Lynch, Simons, and Druckenmiller ideas are mapped to tools in this repo.  
+Use `learning/templates/stock-checklist.md` as a research template.
+
+## Quality & Valuation Screen
+`src/quality_screen.py` provides a lightweight first-pass filter based on ROE, margins, PEG, and debt.
+
+```python
+from src.quality_screen import screen_tickers, get_quality_metrics, score_quality
+
+# Screen a list
+df = screen_tickers(["AAPL", "MSFT", "GOOGL", "NVDA"], min_roe=0.15, max_peg=2.0)
+print(df)
+
+# Single ticker detail
+metrics = get_quality_metrics("AAPL")
+print(score_quality(metrics))
+```
+
+## Statistical Edge Testing
+`src/statistical_edge.py` lets you quickly test whether a simple signal has historical edge.
+
+```python
+from src.statistical_edge import test_momentum_edge
+from src.data_fetcher import fetch_price_history
+
+df = fetch_price_history("AAPL", period="5y")
+result = test_momentum_edge(df["Close"], lookback=20, forward_days=5)
+print(result)
+```
 
 ## Monte Carlo Simulations
 
