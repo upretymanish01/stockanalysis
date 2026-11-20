@@ -22,7 +22,7 @@ stockanalysis/
 │   ├── __init__.py
 │   ├── data_fetcher.py
 │   ├── analysis.py
-│   ├── analytics.py            # retrieve data + summary analytics + plots
+│   ├── analytics.py            # retrieve data + multi-period comparison + plots
 │   ├── monte_carlo.py          # GBM path simulation + risk metrics
 │   ├── quality_screen.py        # Buffett/Lynch-style quality & valuation screen
 │   ├── statistical_edge.py      # simple signal / edge tester
@@ -41,23 +41,36 @@ stockanalysis/
 └── output/                  # generated reports (gitignored)
 ```
 
-## Analytics — Retrieve & Show Data
-`src/analytics.py` pulls price history + quality metrics and produces summary tables, stats, and plots. Results can be saved directly into dated `analysis-results/` folders.
+## Analytics — Retrieve & Show Data (Multi-Period)
+`src/analytics.py` captures price data once, then lets you compare returns across short and long periods easily.
+
+### Multi-period comparison (recommended for your use case)
+Compares 2d / 3d / 4d / 5d, 1w, 1m, 3m, 6m, 1y, 2y in one view.
 
 ```python
-from src.analytics import analytics_for_universe, get_price_analytics, plot_price_and_returns, save_analytics_result
+from src.analytics import multi_period_universe, plot_multi_period_returns, save_analytics_result
 
-# Universe summary
 tickers = ["AAPL", "MSFT", "GOOGL", "NVDA"]
-df = analytics_for_universe(tickers, period="1y")
+df = multi_period_universe(tickers)
 print(df)
 
-# Save to dated analysis-results folder
-save_analytics_result(df, title="bigtech-1y-analytics")
+# Visual comparison
+plot_multi_period_returns(df, title="Big Tech Multi-Period Returns")
 
-# Single ticker + plot
+# Save result into dated folder
+save_analytics_result(df, title="bigtech-multi-period-returns")
+```
+
+### Other analytics helpers
+```python
+from src.analytics import analytics_for_universe, get_price_analytics, plot_price_and_returns
+
+# Single-period universe summary
+df = analytics_for_universe(["AAPL", "MSFT"], period="1y")
+
+# Price + cumulative return chart
 a = get_price_analytics("AAPL", period="2y")
-plot_price_and_returns(a)  # or save_path="output/aapl.png"
+plot_price_and_returns(a)
 ```
 
 ## Analysis Results
