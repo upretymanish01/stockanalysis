@@ -10,6 +10,13 @@ from .monte_carlo import (
 )
 from .quality_screen import get_quality_metrics, screen_tickers, score_quality
 from .statistical_edge import signal_hit_rate, test_momentum_edge
+from .analytics import (
+    get_price_analytics,
+    full_ticker_analytics,
+    analytics_for_universe,
+    plot_price_and_returns,
+    save_analytics_result,
+)
 
 __all__ = [
     "geometric_brownian_motion",
@@ -21,4 +28,9 @@ __all__ = [
     "score_quality",
     "signal_hit_rate",
     "test_momentum_edge",
+    "get_price_analytics",
+    "full_ticker_analytics",
+    "analytics_for_universe",
+    "plot_price_and_returns",
+    "save_analytics_result",
 ]
