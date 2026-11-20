@@ -24,11 +24,18 @@ stockanalysis/
 │   ├── analysis.py
 │   ├── monte_carlo.py      # GBM path simulation + risk metrics
 │   └── utils.py
+├── learning/         # ongoing notes, concepts, sessions, ideas
+│   ├── concepts/
+│   ├── sessions/
+│   └── ideas/
 ├── notebooks/
 ├── tests/
 ├── data/          # sample data only (large files stay out of git)
 └── output/        # generated reports (gitignored)
 ```
+
+## Learning notes
+Use the `learning/` folder to keep adding notes as you study. See `learning/README.md` for the suggested structure.
 
 ## Monte Carlo Simulations
 
