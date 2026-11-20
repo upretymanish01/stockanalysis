@@ -22,6 +22,7 @@ stockanalysis/
 │   ├── __init__.py
 │   ├── data_fetcher.py
 │   ├── analysis.py
+│   ├── analytics.py            # retrieve data + summary analytics + plots
 │   ├── monte_carlo.py          # GBM path simulation + risk metrics
 │   ├── quality_screen.py        # Buffett/Lynch-style quality & valuation screen
 │   ├── statistical_edge.py      # simple signal / edge tester
@@ -40,10 +41,29 @@ stockanalysis/
 └── output/                  # generated reports (gitignored)
 ```
 
+## Analytics — Retrieve & Show Data
+`src/analytics.py` pulls price history + quality metrics and produces summary tables, stats, and plots. Results can be saved directly into dated `analysis-results/` folders.
+
+```python
+from src.analytics import analytics_for_universe, get_price_analytics, plot_price_and_returns, save_analytics_result
+
+# Universe summary
+tickers = ["AAPL", "MSFT", "GOOGL", "NVDA"]
+df = analytics_for_universe(tickers, period="1y")
+print(df)
+
+# Save to dated analysis-results folder
+save_analytics_result(df, title="bigtech-1y-analytics")
+
+# Single ticker + plot
+a = get_price_analytics("AAPL", period="2y")
+plot_price_and_returns(a)  # or save_path="output/aapl.png"
+```
+
 ## Analysis Results
 Every analysis is saved as a dated Markdown file in `analysis-results/`.
 
-**Naming:** `YYYY-MM-DD-short-description.md`
+**Naming:** `YYYY-MM-DD-short-description.md` (or inside a `YYYY-MM-DD/` folder)
 
 See `analysis-results/README.md` for the full convention and `analysis-results/_template.md` to start a new result.
 
