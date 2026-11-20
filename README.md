@@ -26,6 +26,9 @@ stockanalysis/
 │   ├── quality_screen.py        # Buffett/Lynch-style quality & valuation screen
 │   ├── statistical_edge.py      # simple signal / edge tester
 │   └── utils.py
+├── analysis-results/         # dated records of every analysis run
+│   ├── README.md              # naming convention
+│   └── _template.md            # copy for new results
 ├── learning/                 # ongoing notes, concepts, sessions, ideas
 │   ├── concepts/               # e.g. top-investors-principles.md
 │   ├── sessions/
@@ -36,6 +39,13 @@ stockanalysis/
 ├── data/                    # sample data only (large files stay out of git)
 └── output/                  # generated reports (gitignored)
 ```
+
+## Analysis Results
+Every analysis is saved as a dated Markdown file in `analysis-results/`.
+
+**Naming:** `YYYY-MM-DD-short-description.md`
+
+See `analysis-results/README.md` for the full convention and `analysis-results/_template.md` to start a new result.
 
 ## Learning notes
 Use the `learning/` folder to keep adding notes as you study.  
