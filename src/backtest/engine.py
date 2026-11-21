@@ -3,6 +3,12 @@
 A strategy sees prices only through the decision close. The resulting target
 weights are filled at the next session's open. Commission is cash; slippage
 moves the fill against the trade, both in basis points of traded notional.
+
+Missing prints do not drop a holding out of the valuation. The last positive
+price is used, and the day is logged as a stale mark. After ``delist_after``
+consecutive sessions with neither an open nor a close, the shares are written
+off at zero and the loss is logged. A name that cannot be traded is not treated
+as cash that can be spent on something else.
 """
 
 from __future__ import annotations
@@ -32,6 +38,9 @@ class BacktestConfig:
     slippage_bps: float = 0.0
     rebalance: str = "monthly"
     trade_start: Optional[pd.Timestamp] = None
+    # Consecutive sessions with no open and no close before a held name is
+    # written off at zero. Suspensions shorter than this stay on the last print.
+    delist_after: int = 10
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0:
@@ -40,6 +49,8 @@ class BacktestConfig:
             raise ValueError("commission_bps and slippage_bps must be non-negative")
         if self.rebalance not in {"daily", "weekly", "monthly"}:
             raise ValueError("rebalance must be daily, weekly, or monthly")
+        if self.delist_after < 0:
+            raise ValueError("delist_after must be >= 0 (0 disables write-offs)")
         if self.trade_start is not None:
             self.trade_start = pd.Timestamp(self.trade_start).normalize()
 
@@ -55,6 +66,7 @@ class BacktestResult:
     turnover: float
     decision_log: list[dict] = field(default_factory=list)
     params: dict = field(default_factory=dict)
+    valuation_events: list[dict] = field(default_factory=list)
 
 
 def decision_dates(
@@ -106,24 +118,31 @@ def run_backtest(
     tickers = panel.tickers
     cash = float(config.initial_capital)
     shares = {ticker: 0.0 for ticker in tickers}
+    last_price: dict[str, float] = {}
+    missing_streak = {ticker: 0 for ticker in tickers}
     pending: Optional[pd.Series] = None
     equity_values: list[float] = []
     total_costs = 0.0
     turnover = 0.0
     n_rebalances = 0
     decision_log: list[dict] = []
+    valuation_events: list[dict] = []
 
     for i, dt in enumerate(index):
         stamp = pd.Timestamp(dt)
+        opens = panel.opens.loc[stamp]
+        closes = panel.closes.loc[stamp]
+        _remember_prints(opens, last_price)
         if pending is not None:
-            equity_before = _mark(cash, shares, panel.opens.loc[stamp])
+            equity_before, _ = _mark(cash, shares, opens, last_price)
             cash, shares, traded, cost = _rebalance(
                 cash,
                 shares,
                 pending,
-                panel.opens.loc[stamp],
+                opens,
                 config.commission_bps,
                 config.slippage_bps,
+                last_price,
             )
             total_costs += cost
             if equity_before > 0:
@@ -132,7 +151,26 @@ def run_backtest(
                 n_rebalances += 1
             pending = None
 
-        equity_values.append(_mark(cash, shares, panel.closes.loc[stamp]))
+        _remember_prints(closes, last_price)
+        for ticker in tickers:
+            saw_print = _finite_price(opens, ticker) is not None or _finite_price(closes, ticker) is not None
+            missing_streak[ticker] = 0 if saw_print else missing_streak.get(ticker, 0) + 1
+        _write_off_delisted(
+            shares, last_price, missing_streak, config.delist_after, stamp, valuation_events
+        )
+        equity_now, stale = _mark(cash, shares, closes, last_price)
+        for ticker in stale:
+            if shares.get(ticker, 0.0):
+                valuation_events.append(
+                    {
+                        "date": stamp,
+                        "ticker": ticker,
+                        "action": "stale_mark",
+                        "shares": float(shares[ticker]),
+                        "price": float(last_price[ticker]),
+                    }
+                )
+        equity_values.append(equity_now)
 
         if stamp in decision_set and i + 1 < len(index):
             history = panel.through(stamp)
@@ -155,6 +193,8 @@ def run_backtest(
     metrics = compute_metrics(equity, turnover, total_costs, n_rebalances)
     metrics["strategy"] = strategy.name
     metrics["sample"] = sample
+    metrics["n_stale_marks"] = int(sum(1 for event in valuation_events if event["action"] == "stale_mark"))
+    metrics["n_delistings"] = int(sum(1 for event in valuation_events if event["action"] == "delisted"))
     return BacktestResult(
         name=strategy.name,
         sample=sample,
@@ -165,6 +205,7 @@ def run_backtest(
         turnover=turnover,
         decision_log=decision_log,
         params=dict(getattr(strategy, "params", {}) or {}),
+        valuation_events=valuation_events,
     )
 
 
@@ -182,16 +223,72 @@ def _sanitize_weights(weights: pd.Series | None) -> pd.Series:
     return cleaned
 
 
-def _mark(cash: float, shares: dict[str, float], prices: pd.Series) -> float:
+def _finite_price(prices: pd.Series, ticker: str) -> Optional[float]:
+    px = prices.get(ticker, np.nan) if hasattr(prices, "get") else np.nan
+    if px is None or not np.isfinite(px) or float(px) <= 0:
+        return None
+    return float(px)
+
+
+def _remember_prints(prices: pd.Series, last_price: dict[str, float]) -> None:
+    for ticker in prices.index:
+        px = _finite_price(prices, str(ticker))
+        if px is not None:
+            last_price[str(ticker)] = px
+
+
+def _mark(
+    cash: float,
+    shares: dict[str, float],
+    prices: pd.Series,
+    last_price: dict[str, float],
+) -> tuple[float, list[str]]:
+    """Mark the book. A missing print uses the last positive price, not zero.
+
+    Names with no price ever observed are omitted and listed as unresolved.
+    Held names marked on a stale print are returned so the caller can log them.
+    """
     total = float(cash)
+    stale: list[str] = []
     for ticker, qty in shares.items():
         if not qty:
             continue
-        px = prices.get(ticker, np.nan)
-        if px is None or not np.isfinite(px):
-            continue
+        px = _finite_price(prices, ticker)
+        if px is None:
+            px = last_price.get(ticker)
+            if px is None:
+                continue
+            stale.append(ticker)
         total += float(qty) * float(px)
-    return total
+    return total, stale
+
+
+def _write_off_delisted(
+    shares: dict[str, float],
+    last_price: dict[str, float],
+    missing_streak: dict[str, int],
+    delist_after: int,
+    stamp: pd.Timestamp,
+    events: list[dict],
+) -> None:
+    """Drop a holding after `delist_after` sessions with no print. Proceeds are zero."""
+    if delist_after <= 0:
+        return
+    for ticker, qty in list(shares.items()):
+        if qty and missing_streak.get(ticker, 0) >= delist_after:
+            px = float(last_price.get(ticker, 0.0))
+            events.append(
+                {
+                    "date": stamp,
+                    "ticker": ticker,
+                    "action": "delisted",
+                    "shares": float(qty),
+                    "price": px,
+                    "loss": float(qty * px),
+                }
+            )
+            shares[ticker] = 0.0
+            missing_streak[ticker] = 0
 
 
 def _rebalance(
@@ -201,29 +298,40 @@ def _rebalance(
     opens: pd.Series,
     commission_bps: float,
     slippage_bps: float,
+    last_price: dict[str, float],
 ) -> tuple[float, dict[str, float], float, float]:
-    """Trade toward ``target_weights`` at this open. Returns cash, shares, notional, dollar cost."""
+    """Trade toward ``target_weights`` at this open. Returns cash, shares, notional, dollar cost.
+
+    Holdings with no open stay put. Their last-price value is not spent again
+    on names that do have an open.
+    """
     commission = commission_bps / 10_000.0
     slippage = slippage_bps / 10_000.0
-    equity = _mark(cash, shares, opens)
-    target_shares = {ticker: 0.0 for ticker in shares}
+    equity, _stale = _mark(cash, shares, opens, last_price)
+    locked = {
+        ticker
+        for ticker, qty in shares.items()
+        if qty and _finite_price(opens, ticker) is None
+    }
+    locked_value = sum(shares[ticker] * last_price[ticker] for ticker in locked if ticker in last_price)
+    deployable = max(equity - locked_value, 0.0)
+    target_shares = {ticker: (shares[ticker] if ticker in locked else 0.0) for ticker in shares}
 
-    if equity > 0 and len(target_weights):
+    if deployable > 0 and len(target_weights):
         tradable = []
         for ticker, weight in target_weights.items():
-            if ticker not in shares:
+            if ticker not in shares or ticker in locked:
                 continue
-            px = opens.get(ticker, np.nan)
-            if px is None or not np.isfinite(px) or float(px) <= 0 or float(weight) <= 0:
+            px = _finite_price(opens, ticker)
+            if px is None or float(weight) <= 0:
                 continue
-            tradable.append((ticker, float(weight), float(px)))
+            tradable.append((ticker, float(weight), px))
         weight_sum = sum(weight for _, weight, _ in tradable)
         if weight_sum > 0:
-            # Keep the requested gross exposure when a name cannot be traded.
-            requested = min(float(target_weights.sum()), 1.0)
-            scale = requested / weight_sum
+            gross = min(weight_sum, 1.0)
+            scale = gross / weight_sum
             for ticker, weight, px in tradable:
-                target_shares[ticker] = scale * weight * equity / px
+                target_shares[ticker] = scale * weight * deployable / px
 
     traded = 0.0
     cost = 0.0

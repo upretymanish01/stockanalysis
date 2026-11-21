@@ -414,3 +414,73 @@ def test_momentum_signal_uses_skipped_window_only():
     assert weights.index.tolist() == ["AAA"]
     # The most recent `skip` sessions are not the momentum window.
     assert past != pytest.approx(recent_only)
+
+
+def test_missing_close_keeps_the_last_price_instead_of_dropping_the_position():
+    # Fill at day-2 open 20 after the day-1 close hits 30. Day 3 has no print.
+    # Shares = 100/20 = 5. Last close is 21, so equity stays 105 rather than
+    # collapsing to leftover cash (zero).
+    panel = _panel_from_prices(
+        opens={"AAA": [10, 10, 20, np.nan, 22]},
+        closes={"AAA": [10, 30, 21, np.nan, 25]},
+    )
+    result = run_backtest(
+        panel,
+        _LatchLong("AAA", level=30),
+        BacktestConfig(rebalance="daily", initial_capital=100, delist_after=10),
+    )
+    hole = panel.index[3]
+    assert result.equity.loc[hole] == pytest.approx(105)
+    assert result.equity.iloc[-1] == pytest.approx(125)
+    assert result.metrics["n_delistings"] == 0
+    assert result.metrics["n_stale_marks"] == 1
+    assert any(event["action"] == "stale_mark" and event["ticker"] == "AAA" for event in result.valuation_events)
+
+
+def test_extended_missing_prices_are_written_off_as_a_delisting():
+    panel = _panel_from_prices(
+        opens={"AAA": [10, 10, 20, np.nan, np.nan, np.nan]},
+        closes={"AAA": [10, 30, 21, np.nan, np.nan, np.nan]},
+    )
+    result = run_backtest(
+        panel,
+        _LatchLong("AAA", level=30),
+        BacktestConfig(rebalance="daily", initial_capital=100, delist_after=2),
+    )
+    # Two missing sessions write the holding off at the last close (21).
+    assert result.equity.iloc[-1] == pytest.approx(0)
+    delistings = [event for event in result.valuation_events if event["action"] == "delisted"]
+    assert len(delistings) == 1
+    assert delistings[0]["loss"] == pytest.approx(105)
+    assert result.metrics["n_delistings"] == 1
+
+
+class _Rotate:
+    warmup = 0
+    name = "rotate"
+    params = {}
+
+    def __init__(self):
+        self.calls = 0
+
+    def target_weights(self, as_of, history):
+        self.calls += 1
+        if self.calls <= 2:
+            return pd.Series({"AAA": 1.0})
+        return pd.Series({"BBB": 1.0})
+
+
+def test_suspended_holding_is_not_resold_or_double_counted():
+    panel = _panel_from_prices(
+        opens={"AAA": [10, 10, np.nan, np.nan], "BBB": [10, 10, 10, 10]},
+        closes={"AAA": [10, 10, np.nan, np.nan], "BBB": [10, 10, 10, 12]},
+    )
+    result = run_backtest(
+        panel,
+        _Rotate(),
+        BacktestConfig(rebalance="daily", initial_capital=100, delist_after=10),
+    )
+    # Bought 10 AAA shares at 10. The suspension blocks the sale, so the book
+    # stays in AAA and is not used as cash to buy BBB.
+    assert result.equity.iloc[-1] == pytest.approx(100)
+    assert all(event["ticker"] != "BBB" or event["action"] != "stale_mark" for event in result.valuation_events)

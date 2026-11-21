@@ -225,6 +225,22 @@ print(comparison.summary)
 
 **Survivorship bias.** The theme lists are today's listed names. Yahoo Finance does not put delisted, acquired, or bankrupt companies back into those lists, and a renamed ticker may not include the old symbol's history. A backtest on this universe is biased upward versus a point-in-time membership list. The live screener's earnings-growth filter is also omitted unless you pass a point-in-time earnings series, because `yfinance` `.info` is the current snapshot rather than the number known on each decision date. Those limits are repeated in every report the CLI writes.
 
+A missing open or close does not delete a holding from the equity curve. The backtest marks it at the last positive price, logs a stale mark, and after ten sessions with no print writes the shares off at zero. A suspended name is not treated as cash that can be spent on another ticker.
+
+## Research comparison (21 / 42 / 63 sessions)
+
+`src/research` builds point-in-time price and volume features, labels the return from the next open to the open `horizon` sessions later, and compares a 12-1 momentum score with ridge regression, a shallow boosted tree, and a logistic probability. Training rows whose labels overlap a test window are purged. The last 126 sessions are a holdout: they are not used to pick the model or the probability threshold. The ranker is allowed to return no names. Nothing in this package sends orders.
+
+```bash
+python -m src.research \
+  --themes tech,finance,healthcare \
+  --start 2016-01-01 \
+  --end 2026-11-21 \
+  --holdout-days 126
+```
+
+The printed JSON is the result of that run. `docs/research-status.md` records one such run and lists the phases that are not built yet, including scheduled retraining, model promotion, and any broker connection.
+
 ## Getting Started
 ```bash
 git clone https://github.com/upretymanish01/stockanalysis.git
