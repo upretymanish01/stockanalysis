@@ -8,7 +8,7 @@ Includes multi-period comparison so you can capture data once and compare
 
 Every analysis run:
 - Records focus (industry or whole market)
-- Returns only the top 5 by risk-adjusted ranking
+- Returns only the top 5 by composite score (more accurate)
 - Includes pattern score, relative strength vs SPY, and volume
 - Saves both Markdown and CSV
 """
@@ -97,12 +97,10 @@ def _pattern_score(close: pd.Series) -> int:
         score += 1
     if ma50 > ma200:
         score += 1
-    # Higher low in last ~20 days
     recent_low = close.tail(20).min()
     prior_low = close.iloc[-40:-20].min() if len(close) >= 40 else recent_low
     if recent_low > prior_low:
         score += 1
-    # Volume not used here; kept simple
     if latest > close.tail(20).mean():
         score += 1
     return score
@@ -145,7 +143,7 @@ def multi_period_returns(
 ) -> pd.DataFrame:
     """Capture price data once, then compute total returns over multiple lookback windows."""
     if lookbacks is None:
-        lookbacks = [2, 3, 4, 5, 21, 63, 126, 252]  # avoid 504 edge case on 2y
+        lookbacks = [2, 3, 4, 5, 21, 63, 126, 252]
 
     label_map = {
         2: "2d", 3: "3d", 4: "4d", 5: "5d / 1w",
@@ -219,17 +217,34 @@ def multi_period_universe(
     return pd.concat(frames, ignore_index=True)
 
 
+def _add_composite_score(df: pd.DataFrame) -> pd.DataFrame:
+    """Add composite score: 50% risk-adjusted, 25% pattern, 25% relative strength."""
+    df = df.copy()
+    # Normalize components to roughly 0-1 range for weighting
+    risk = df["risk_adjusted_score"].fillna(0)
+    risk_norm = (risk - risk.min()) / (risk.max() - risk.min() + 1e-9)
+    pattern_norm = df["pattern_score"].fillna(0) / 4.0
+    rs = df["relative_strength_vs_spy"].fillna(0)
+    rs_norm = (rs - rs.min()) / (rs.max() - rs.min() + 1e-9)
+    df["composite_score"] = 0.50 * risk_norm + 0.25 * pattern_norm + 0.25 * rs_norm
+    return df
+
+
 def top_5_by_timeframe(
     df: pd.DataFrame,
     timeframe: str = "1m",
-    rank_by: str = "risk_adjusted_score",
+    rank_by: str = "composite_score",
     max_noise: float = 2.0,
+    min_pattern: int = 2,
+    min_volume: float = 500_000,
 ) -> pd.DataFrame:
     """
-    Return only the top 5 tickers for a given timeframe.
+    Return only the top 5 tickers for a given timeframe using composite score.
 
-    Default ranking is by risk_adjusted_score (higher is better).
-    Optionally filters out high-noise names (noise_score > max_noise).
+    Filters applied by default:
+    - noise_score <= max_noise
+    - pattern_score >= min_pattern
+    - avg_volume >= min_volume
     """
     if df.empty or "timeframe" not in df.columns:
         return df
@@ -238,11 +253,18 @@ def top_5_by_timeframe(
     if subset.empty:
         return subset
 
-    if "noise_score" in subset.columns and max_noise is not None:
+    # Filters for higher accuracy
+    if "noise_score" in subset.columns:
         subset = subset[subset["noise_score"].isna() | (subset["noise_score"] <= max_noise)]
+    if "pattern_score" in subset.columns:
+        subset = subset[subset["pattern_score"].fillna(0) >= min_pattern]
+    if "avg_volume" in subset.columns:
+        subset = subset[subset["avg_volume"].fillna(0) >= min_volume]
+
+    subset = _add_composite_score(subset)
 
     if rank_by not in subset.columns:
-        rank_by = "actual_return_pct"
+        rank_by = "composite_score"
 
     subset = subset.sort_values(rank_by, ascending=False, na_position="last")
     return subset.head(5).reset_index(drop=True)
@@ -420,7 +442,7 @@ def save_analytics_result(
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  
 **Focus:** {focus}  
 **Model / Method:** {model}  
-**Ranking:** risk-adjusted score (top 5)  
+**Ranking:** composite score (risk-adjusted + pattern + relative strength)  
 **Top stocks:** {stocks_str}  
 **CSV data:** `{csv_path.name}`  
 
