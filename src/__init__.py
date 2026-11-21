@@ -21,6 +21,8 @@ from .analytics import (
     plot_multi_period_returns,
     attach_model_predictions,
     top_5_by_timeframe,
+    get_tickers_for_focus,
+    FOCUS_CATEGORIES,
 )
 
 __all__ = [
@@ -43,4 +45,6 @@ __all__ = [
     "plot_multi_period_returns",
     "attach_model_predictions",
     "top_5_by_timeframe",
+    "get_tickers_for_focus",
+    "FOCUS_CATEGORIES",
 ]
