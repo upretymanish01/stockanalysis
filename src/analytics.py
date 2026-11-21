@@ -8,8 +8,10 @@ Includes multi-period comparison so you can capture data once and compare
 
 Every analysis run:
 - Records focus (industry or whole market)
-- Returns only the top 5 by composite score (more accurate)
-- Includes pattern score, relative strength vs SPY, volume, and Monte Carlo expected return + probability
+- Returns only the top 5 by composite score
+- Includes pattern score, relative strength (vs SPY and sector), volume, Monte Carlo expected return, probability, and 95% VaR
+- Suggests conservative position size (1% risk)
+- Applies earnings growth filter when available
 - Saves both Markdown and CSV
 """
 
@@ -45,6 +47,27 @@ FOCUS_CATEGORIES = {
     "healthcare": ["JNJ", "UNH", "PFE", "LLY"],
     "consumer staples": ["PG", "KO", "WMT", "COST"],
     "real estate": ["PLD", "AMT", "EQIX"],
+}
+
+# Simple sector ETF mapping for relative strength (approximate)
+SECTOR_ETF = {
+    "chip making": "SMH",
+    "ai": "XLK",
+    "robotics": "ROBO",
+    "renewable": "ICLN",
+    "aerospace": "ITA",
+    "fashion": "XRT",
+    "rockets": "UFO",
+    "education": "EDUT",
+    "services": "XLK",
+    "tech": "XLK",
+    "banking": "XLF",
+    "finance": "XLF",
+    "insurance": "KIE",
+    "energy": "XLE",
+    "healthcare": "XLV",
+    "consumer staples": "XLP",
+    "real estate": "XLRE",
 }
 
 
@@ -107,23 +130,23 @@ def _pattern_score(close: pd.Series) -> int:
     return score
 
 
-def _relative_strength(ticker: str, period: str = "1y") -> float:
-    """Return relative strength vs SPY over the period (stock return - SPY return)."""
+def _relative_strength(ticker: str, benchmark: str = "SPY", period: str = "1y") -> float:
+    """Return relative strength vs a benchmark (stock return - benchmark return)."""
     try:
         stock = fetch_price_history(ticker, period=period)
-        spy = fetch_price_history("SPY", period=period)
-        if stock.empty or spy.empty:
+        bench = fetch_price_history(benchmark, period=period)
+        if stock.empty or bench.empty:
             return np.nan
         stock_ret = stock["Close"].iloc[-1] / stock["Close"].iloc[0] - 1
-        spy_ret = spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1
-        return float(stock_ret - spy_ret)
+        bench_ret = bench["Close"].iloc[-1] / bench["Close"].iloc[0] - 1
+        return float(stock_ret - bench_ret)
     except Exception:
         return np.nan
 
 
 def _monte_carlo_for_horizon(close: pd.Series, days: int, n_simulations: int = 5_000) -> Dict:
     """
-    Run a quick Monte Carlo for the given horizon and return expected return + probability of gain.
+    Run a quick Monte Carlo for the given horizon and return expected return, probability of gain, and 95% VaR.
     """
     try:
         params = estimate_params_from_history(close)
@@ -140,9 +163,10 @@ def _monte_carlo_for_horizon(close: pd.Series, days: int, n_simulations: int = 5
         return {
             "mc_expected_return": summary["mean_return"],
             "mc_probability_gain": summary["prob_gain"],
+            "mc_var_95": summary["var_95"],  # negative number = downside
         }
     except Exception:
-        return {"mc_expected_return": np.nan, "mc_probability_gain": np.nan}
+        return {"mc_expected_return": np.nan, "mc_probability_gain": np.nan, "mc_var_95": np.nan}
 
 
 def _basic_fundamentals(ticker: str) -> Dict:
@@ -165,6 +189,7 @@ def multi_period_returns(
     ticker: str,
     lookbacks: Optional[List[int]] = None,
     base_period: str = "2y",
+    focus: Optional[str] = None,
 ) -> pd.DataFrame:
     """Capture price data once, then compute total returns over multiple lookback windows."""
     if lookbacks is None:
@@ -176,7 +201,6 @@ def multi_period_returns(
         252: "1y",
     }
 
-    # Horizons where we run Monte Carlo
     mc_horizons = {21, 63}
 
     df = fetch_price_history(ticker, period=base_period)
@@ -187,12 +211,13 @@ def multi_period_returns(
     latest = close.iloc[-1]
     noise = _noise_score(close)
     pattern = _pattern_score(close)
-    rel_strength = _relative_strength(ticker, base_period)
+    rel_spy = _relative_strength(ticker, "SPY", base_period)
+    sector_etf = SECTOR_ETF.get(focus.lower() if focus else "", "SPY")
+    rel_sector = _relative_strength(ticker, sector_etf, base_period)
     avg_vol = float(df["Volume"].mean())
     fundamentals = _basic_fundamentals(ticker)
     returns = close.pct_change().dropna()
 
-    # Pre-compute Monte Carlo for 1m and 3m
     mc_cache = {}
     for d in mc_horizons:
         if d < len(close):
@@ -210,7 +235,13 @@ def multi_period_returns(
         vol = window_returns.std()
         risk_adj = float(total_ret / vol) if vol and vol > 0 else np.nan
 
-        mc = mc_cache.get(days, {"mc_expected_return": np.nan, "mc_probability_gain": np.nan})
+        mc = mc_cache.get(days, {"mc_expected_return": np.nan, "mc_probability_gain": np.nan, "mc_var_95": np.nan})
+
+        # Conservative position size suggestion: risk 1% of capital based on 95% VaR magnitude
+        var_abs = abs(mc.get("mc_var_95", 0.05) or 0.05)
+        suggested_risk_pct = 0.01  # 1% of capital
+        suggested_position_pct = suggested_risk_pct / max(var_abs, 0.01) if var_abs > 0 else 0.0
+        suggested_position_pct = min(suggested_position_pct, 0.10)  # cap at 10% of capital
 
         rows.append({
             "ticker": ticker,
@@ -225,10 +256,13 @@ def multi_period_returns(
             "risk_adjusted_score": risk_adj,
             "noise_score": noise,
             "pattern_score": pattern,
-            "relative_strength_vs_spy": rel_strength,
+            "relative_strength_vs_spy": rel_spy,
+            "relative_strength_vs_sector": rel_sector,
             "avg_volume": avg_vol,
             "mc_expected_return": mc["mc_expected_return"],
             "mc_probability_gain": mc["mc_probability_gain"],
+            "mc_var_95": mc["mc_var_95"],
+            "suggested_position_pct": round(suggested_position_pct * 100, 1),
             "last_quarter_earnings": fundamentals.get("last_quarter_earnings"),
             "operating_expenses": fundamentals.get("operating_expenses"),
             "capex": fundamentals.get("capex"),
@@ -237,7 +271,7 @@ def multi_period_returns(
             "model_expected_return": mc["mc_expected_return"],
             "model_probability": mc["mc_probability_gain"],
             "prediction_date": datetime.now().strftime("%Y-%m-%d") if days in mc_horizons else None,
-            "notes": None,
+            "notes": "Risk 1% of capital; position size capped for safety",
         })
 
     return pd.DataFrame(rows)
@@ -247,23 +281,26 @@ def multi_period_universe(
     tickers: List[str],
     lookbacks: Optional[List[int]] = None,
     base_period: str = "2y",
+    focus: Optional[str] = None,
 ) -> pd.DataFrame:
     """Run multi-period returns for multiple tickers."""
     frames = []
     for t in tickers:
-        frames.append(multi_period_returns(t, lookbacks, base_period))
+        frames.append(multi_period_returns(t, lookbacks, base_period, focus=focus))
     return pd.concat(frames, ignore_index=True)
 
 
 def _add_composite_score(df: pd.DataFrame) -> pd.DataFrame:
-    """Add composite score: 50% risk-adjusted, 25% pattern, 25% relative strength."""
+    """Add composite score: 40% risk-adjusted, 20% pattern, 20% RS vs SPY, 20% RS vs sector."""
     df = df.copy()
     risk = df["risk_adjusted_score"].fillna(0)
     risk_norm = (risk - risk.min()) / (risk.max() - risk.min() + 1e-9)
     pattern_norm = df["pattern_score"].fillna(0) / 4.0
-    rs = df["relative_strength_vs_spy"].fillna(0)
-    rs_norm = (rs - rs.min()) / (rs.max() - rs.min() + 1e-9)
-    df["composite_score"] = 0.50 * risk_norm + 0.25 * pattern_norm + 0.25 * rs_norm
+    rs_spy = df["relative_strength_vs_spy"].fillna(0)
+    rs_spy_norm = (rs_spy - rs_spy.min()) / (rs_spy.max() - rs_spy.min() + 1e-9)
+    rs_sec = df.get("relative_strength_vs_sector", pd.Series(0, index=df.index)).fillna(0)
+    rs_sec_norm = (rs_sec - rs_sec.min()) / (rs_sec.max() - rs_sec.min() + 1e-9)
+    df["composite_score"] = 0.40 * risk_norm + 0.20 * pattern_norm + 0.20 * rs_spy_norm + 0.20 * rs_sec_norm
     return df
 
 
@@ -274,6 +311,7 @@ def top_5_by_timeframe(
     max_noise: float = 2.0,
     min_pattern: int = 2,
     min_volume: float = 500_000,
+    require_positive_earnings: bool = True,
 ) -> pd.DataFrame:
     """
     Return only the top 5 tickers for a given timeframe using composite score.
@@ -282,6 +320,7 @@ def top_5_by_timeframe(
     - noise_score <= max_noise
     - pattern_score >= min_pattern
     - avg_volume >= min_volume
+    - positive last_quarter_earnings when available (if require_positive_earnings)
     """
     if df.empty or "timeframe" not in df.columns:
         return df
@@ -296,6 +335,8 @@ def top_5_by_timeframe(
         subset = subset[subset["pattern_score"].fillna(0) >= min_pattern]
     if "avg_volume" in subset.columns:
         subset = subset[subset["avg_volume"].fillna(0) >= min_volume]
+    if require_positive_earnings and "last_quarter_earnings" in subset.columns:
+        subset = subset[subset["last_quarter_earnings"].isna() | (subset["last_quarter_earnings"] > 0)]
 
     subset = _add_composite_score(subset)
 
@@ -478,13 +519,19 @@ def save_analytics_result(
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  
 **Focus:** {focus}  
 **Model / Method:** {model}  
-**Ranking:** composite score (risk-adjusted + pattern + relative strength)  
+**Ranking:** composite score (risk-adjusted + pattern + RS vs SPY + RS vs sector)  
 **Top stocks:** {stocks_str}  
 **CSV data:** `{csv_path.name}`  
 
 ## Summary Table (Top 5)
 
 {summary_df.to_markdown(index=False) if hasattr(summary_df, 'to_markdown') else summary_df.to_string()}
+
+## Risk Notes
+- Position size suggestion is based on risking only 1% of capital using the Monte Carlo 95% VaR.
+- Cap at 10% of capital per position.
+- This is not a guarantee of returns. Past performance and simulations do not predict the future.
+- Always use proper risk management. Never risk more than you can afford to lose.
 
 ## Notes
 {notes}
