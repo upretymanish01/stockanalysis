@@ -21,7 +21,12 @@ def signal_hit_rate(
     forward_days: int = 5,
 ) -> dict:
     """
-    Measure how often a binary signal is followed by positive forward returns.
+    Measure how often a binary signal is followed by a positive cumulative
+    forward return.
+
+    The forward return is the N-day holding-period return from the signal
+    bar, P[t + forward_days] / P[t] - 1, not the single session return on
+    day t + forward_days.
 
     Args:
         prices: Price series (aligned index with signal)
@@ -31,15 +36,14 @@ def signal_hit_rate(
     Returns:
         Dictionary with hit rate, average forward return, count, etc.
     """
-    returns = compute_returns(prices)
-    # Align
-    df = pd.DataFrame({"ret": returns, "signal": signal}).dropna()
+    if forward_days < 1:
+        return {"error": "forward_days must be >= 1"}
+
+    # Cumulative close-to-close return over the next `forward_days` sessions.
+    fwd_ret = prices.shift(-int(forward_days)) / prices - 1
+    df = pd.DataFrame({"fwd_ret": fwd_ret, "signal": signal}).dropna()
     if df.empty:
         return {"error": "No overlapping data"}
-
-    # Forward return
-    df["fwd_ret"] = df["ret"].shift(-forward_days)
-    df = df.dropna()
 
     signaled = df[df["signal"] == True]  # or == 1
     if len(signaled) == 0:
