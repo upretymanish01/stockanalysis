@@ -8,7 +8,7 @@ Includes multi-period comparison so you can capture data once and compare
 
 Every analysis run:
 - Records focus (industry or whole market)
-- Returns only the top 5 by ranking
+- Returns only the top 5 by risk-adjusted ranking
 - Saves both Markdown and CSV
 """
 
@@ -102,6 +102,7 @@ def multi_period_returns(
     latest = close.iloc[-1]
     noise = _noise_score(close)
     fundamentals = _basic_fundamentals(ticker)
+    returns = close.pct_change().dropna()
 
     rows = []
     for days in lookbacks:
@@ -110,6 +111,11 @@ def multi_period_returns(
         start_idx = max(0, len(close) - days - 1)
         start_price = close.iloc[start_idx]
         total_ret = (latest / start_price) - 1
+
+        # Simple risk-adjusted score for this window
+        window_returns = returns.tail(days) if days < len(returns) else returns
+        vol = window_returns.std()
+        risk_adj = float(total_ret / vol) if vol and vol > 0 else np.nan
 
         rows.append({
             "ticker": ticker,
@@ -121,6 +127,7 @@ def multi_period_returns(
             "end_price": float(latest),
             "actual_return": float(total_ret),
             "actual_return_pct": round(total_ret * 100, 2),
+            "risk_adjusted_score": risk_adj,
             "noise_score": noise,
             "last_quarter_earnings": fundamentals.get("last_quarter_earnings"),
             "operating_expenses": fundamentals.get("operating_expenses"),
@@ -151,11 +158,14 @@ def multi_period_universe(
 def top_5_by_timeframe(
     df: pd.DataFrame,
     timeframe: str = "1m",
-    rank_by: str = "actual_return_pct",
+    rank_by: str = "risk_adjusted_score",
+    max_noise: float = 2.0,
 ) -> pd.DataFrame:
     """
     Return only the top 5 tickers for a given timeframe.
-    Default ranking is by actual_return_pct (highest first).
+
+    Default ranking is by risk_adjusted_score (higher is better).
+    Optionally filters out high-noise names (noise_score > max_noise).
     """
     if df.empty or "timeframe" not in df.columns:
         return df
@@ -163,6 +173,13 @@ def top_5_by_timeframe(
     subset = df[df["timeframe"] == timeframe].copy()
     if subset.empty:
         return subset
+
+    # Filter high noise if column exists
+    if "noise_score" in subset.columns and max_noise is not None:
+        subset = subset[subset["noise_score"].isna() | (subset["noise_score"] <= max_noise)]
+
+    if rank_by not in subset.columns:
+        rank_by = "actual_return_pct"
 
     subset = subset.sort_values(rank_by, ascending=False, na_position="last")
     return subset.head(5).reset_index(drop=True)
@@ -334,6 +351,7 @@ def save_analytics_result(
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  
 **Focus:** {focus}  
 **Model / Method:** {model}  
+**Ranking:** risk-adjusted score (top 5)  
 **Top stocks:** {stocks_str}  
 **CSV data:** `{csv_path.name}`  
 
