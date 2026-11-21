@@ -9,7 +9,7 @@ Includes multi-period comparison so you can capture data once and compare
 Every analysis run:
 - Records focus (industry or whole market)
 - Returns only the top 5 by composite score (more accurate)
-- Includes pattern score, relative strength vs SPY, and volume
+- Includes pattern score, relative strength vs SPY, volume, and Monte Carlo expected return + probability
 - Saves both Markdown and CSV
 """
 
@@ -23,6 +23,7 @@ import pandas as pd
 import yfinance as yf
 
 from .data_fetcher import fetch_price_history
+from .monte_carlo import estimate_params_from_history, simulate_stock_paths, summarize_terminal_prices
 from .quality_screen import get_quality_metrics
 
 # Expanded focus categories → example tickers
@@ -120,6 +121,30 @@ def _relative_strength(ticker: str, period: str = "1y") -> float:
         return np.nan
 
 
+def _monte_carlo_for_horizon(close: pd.Series, days: int, n_simulations: int = 5_000) -> Dict:
+    """
+    Run a quick Monte Carlo for the given horizon and return expected return + probability of gain.
+    """
+    try:
+        params = estimate_params_from_history(close)
+        S0 = float(close.iloc[-1])
+        paths = simulate_stock_paths(
+            S0=S0,
+            mu=params["mu"],
+            sigma=params["sigma"],
+            days=days,
+            n_simulations=n_simulations,
+            seed=42,
+        )
+        summary = summarize_terminal_prices(paths)
+        return {
+            "mc_expected_return": summary["mean_return"],
+            "mc_probability_gain": summary["prob_gain"],
+        }
+    except Exception:
+        return {"mc_expected_return": np.nan, "mc_probability_gain": np.nan}
+
+
 def _basic_fundamentals(ticker: str) -> Dict:
     """Pull a few useful fundamentals when available."""
     try:
@@ -151,6 +176,9 @@ def multi_period_returns(
         252: "1y",
     }
 
+    # Horizons where we run Monte Carlo
+    mc_horizons = {21, 63}
+
     df = fetch_price_history(ticker, period=base_period)
     if df.empty or len(df) < max(lookbacks):
         return pd.DataFrame([{"ticker": ticker, "error": "Insufficient data"}])
@@ -164,6 +192,12 @@ def multi_period_returns(
     fundamentals = _basic_fundamentals(ticker)
     returns = close.pct_change().dropna()
 
+    # Pre-compute Monte Carlo for 1m and 3m
+    mc_cache = {}
+    for d in mc_horizons:
+        if d < len(close):
+            mc_cache[d] = _monte_carlo_for_horizon(close, d)
+
     rows = []
     for days in lookbacks:
         if days >= len(close):
@@ -175,6 +209,8 @@ def multi_period_returns(
         window_returns = returns.tail(days) if days < len(returns) else returns
         vol = window_returns.std()
         risk_adj = float(total_ret / vol) if vol and vol > 0 else np.nan
+
+        mc = mc_cache.get(days, {"mc_expected_return": np.nan, "mc_probability_gain": np.nan})
 
         rows.append({
             "ticker": ticker,
@@ -191,14 +227,16 @@ def multi_period_returns(
             "pattern_score": pattern,
             "relative_strength_vs_spy": rel_strength,
             "avg_volume": avg_vol,
+            "mc_expected_return": mc["mc_expected_return"],
+            "mc_probability_gain": mc["mc_probability_gain"],
             "last_quarter_earnings": fundamentals.get("last_quarter_earnings"),
             "operating_expenses": fundamentals.get("operating_expenses"),
             "capex": fundamentals.get("capex"),
             "total_revenue": fundamentals.get("total_revenue"),
-            "model_name": None,
-            "model_expected_return": None,
-            "model_probability": None,
-            "prediction_date": None,
+            "model_name": "monte_carlo_gbm" if days in mc_horizons else None,
+            "model_expected_return": mc["mc_expected_return"],
+            "model_probability": mc["mc_probability_gain"],
+            "prediction_date": datetime.now().strftime("%Y-%m-%d") if days in mc_horizons else None,
             "notes": None,
         })
 
@@ -220,7 +258,6 @@ def multi_period_universe(
 def _add_composite_score(df: pd.DataFrame) -> pd.DataFrame:
     """Add composite score: 50% risk-adjusted, 25% pattern, 25% relative strength."""
     df = df.copy()
-    # Normalize components to roughly 0-1 range for weighting
     risk = df["risk_adjusted_score"].fillna(0)
     risk_norm = (risk - risk.min()) / (risk.max() - risk.min() + 1e-9)
     pattern_norm = df["pattern_score"].fillna(0) / 4.0
@@ -253,7 +290,6 @@ def top_5_by_timeframe(
     if subset.empty:
         return subset
 
-    # Filters for higher accuracy
     if "noise_score" in subset.columns:
         subset = subset[subset["noise_score"].isna() | (subset["noise_score"] <= max_noise)]
     if "pattern_score" in subset.columns:
