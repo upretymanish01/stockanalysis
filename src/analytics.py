@@ -9,6 +9,7 @@ Includes multi-period comparison so you can capture data once and compare
 Every analysis run:
 - Records focus (industry or whole market)
 - Returns only the top 5 by risk-adjusted ranking
+- Includes pattern score, relative strength vs SPY, and volume
 - Saves both Markdown and CSV
 """
 
@@ -23,6 +24,27 @@ import yfinance as yf
 
 from .data_fetcher import fetch_price_history
 from .quality_screen import get_quality_metrics
+
+# Expanded focus categories → example tickers
+FOCUS_CATEGORIES = {
+    "chip making": ["NVDA", "TSM", "AVGO", "AMD", "ASML"],
+    "ai": ["NVDA", "MSFT", "GOOGL", "META", "PLTR"],
+    "robotics": ["ISRG", "PATH", "SYM", "TER"],
+    "renewable": ["ENPH", "FSLR", "NEE", "PLUG"],
+    "aerospace": ["BA", "RTX", "LMT", "NOC"],
+    "fashion": ["NKE", "LULU", "PVH", "TPR"],
+    "rockets": ["RKLB", "ASTS", "LUNR"],
+    "education": ["DUOL", "CHGG", "STRA"],
+    "services": ["CRM", "NOW", "ADBE", "INTU"],
+    "tech": ["AAPL", "MSFT", "GOOGL", "AMZN"],
+    "banking": ["JPM", "BAC", "WFC", "GS", "MS"],
+    "finance": ["V", "MA", "PYPL", "SQ", "AXP"],
+    "insurance": ["BRK-B", "PGR", "CB", "MET"],
+    "energy": ["XOM", "CVX", "COP"],
+    "healthcare": ["JNJ", "UNH", "PFE", "LLY"],
+    "consumer staples": ["PG", "KO", "WMT", "COST"],
+    "real estate": ["PLD", "AMT", "EQIX"],
+}
 
 
 def get_price_analytics(ticker: str, period: str = "1y") -> Dict:
@@ -63,6 +85,43 @@ def _noise_score(close: pd.Series, window: int = 20) -> float:
     return float(recent_vol / longer_vol)
 
 
+def _pattern_score(close: pd.Series) -> int:
+    """Simple pattern score 0-4 based on moving averages and higher low."""
+    if len(close) < 200:
+        return 0
+    ma50 = close.rolling(50).mean().iloc[-1]
+    ma200 = close.rolling(200).mean().iloc[-1]
+    latest = close.iloc[-1]
+    score = 0
+    if latest > ma50:
+        score += 1
+    if ma50 > ma200:
+        score += 1
+    # Higher low in last ~20 days
+    recent_low = close.tail(20).min()
+    prior_low = close.iloc[-40:-20].min() if len(close) >= 40 else recent_low
+    if recent_low > prior_low:
+        score += 1
+    # Volume not used here; kept simple
+    if latest > close.tail(20).mean():
+        score += 1
+    return score
+
+
+def _relative_strength(ticker: str, period: str = "1y") -> float:
+    """Return relative strength vs SPY over the period (stock return - SPY return)."""
+    try:
+        stock = fetch_price_history(ticker, period=period)
+        spy = fetch_price_history("SPY", period=period)
+        if stock.empty or spy.empty:
+            return np.nan
+        stock_ret = stock["Close"].iloc[-1] / stock["Close"].iloc[0] - 1
+        spy_ret = spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1
+        return float(stock_ret - spy_ret)
+    except Exception:
+        return np.nan
+
+
 def _basic_fundamentals(ticker: str) -> Dict:
     """Pull a few useful fundamentals when available."""
     try:
@@ -86,12 +145,12 @@ def multi_period_returns(
 ) -> pd.DataFrame:
     """Capture price data once, then compute total returns over multiple lookback windows."""
     if lookbacks is None:
-        lookbacks = [2, 3, 4, 5, 21, 63, 126, 252, 504]
+        lookbacks = [2, 3, 4, 5, 21, 63, 126, 252]  # avoid 504 edge case on 2y
 
     label_map = {
         2: "2d", 3: "3d", 4: "4d", 5: "5d / 1w",
         21: "1m", 63: "3m", 126: "6m",
-        252: "1y", 504: "2y",
+        252: "1y",
     }
 
     df = fetch_price_history(ticker, period=base_period)
@@ -101,6 +160,9 @@ def multi_period_returns(
     close = df["Close"]
     latest = close.iloc[-1]
     noise = _noise_score(close)
+    pattern = _pattern_score(close)
+    rel_strength = _relative_strength(ticker, base_period)
+    avg_vol = float(df["Volume"].mean())
     fundamentals = _basic_fundamentals(ticker)
     returns = close.pct_change().dropna()
 
@@ -112,7 +174,6 @@ def multi_period_returns(
         start_price = close.iloc[start_idx]
         total_ret = (latest / start_price) - 1
 
-        # Simple risk-adjusted score for this window
         window_returns = returns.tail(days) if days < len(returns) else returns
         vol = window_returns.std()
         risk_adj = float(total_ret / vol) if vol and vol > 0 else np.nan
@@ -129,6 +190,9 @@ def multi_period_returns(
             "actual_return_pct": round(total_ret * 100, 2),
             "risk_adjusted_score": risk_adj,
             "noise_score": noise,
+            "pattern_score": pattern,
+            "relative_strength_vs_spy": rel_strength,
+            "avg_volume": avg_vol,
             "last_quarter_earnings": fundamentals.get("last_quarter_earnings"),
             "operating_expenses": fundamentals.get("operating_expenses"),
             "capex": fundamentals.get("capex"),
@@ -174,7 +238,6 @@ def top_5_by_timeframe(
     if subset.empty:
         return subset
 
-    # Filter high noise if column exists
     if "noise_score" in subset.columns and max_noise is not None:
         subset = subset[subset["noise_score"].isna() | (subset["noise_score"] <= max_noise)]
 
@@ -183,6 +246,12 @@ def top_5_by_timeframe(
 
     subset = subset.sort_values(rank_by, ascending=False, na_position="last")
     return subset.head(5).reset_index(drop=True)
+
+
+def get_tickers_for_focus(focus: str) -> List[str]:
+    """Return example tickers for a focus category."""
+    key = focus.lower().strip()
+    return FOCUS_CATEGORIES.get(key, [])
 
 
 def attach_model_predictions(
@@ -220,7 +289,7 @@ def plot_multi_period_returns(
     pivot = df.pivot(index="timeframe" if "timeframe" in df.columns else "period_label",
                      columns="ticker", values=value_col)
 
-    preferred_order = ["2d", "3d", "4d", "5d / 1w", "1m", "3m", "6m", "1y", "2y"]
+    preferred_order = ["2d", "3d", "4d", "5d / 1w", "1m", "3m", "6m", "1y"]
     existing = [p for p in preferred_order if p in pivot.index]
     if existing:
         pivot = pivot.reindex(existing)
@@ -326,7 +395,7 @@ def save_analytics_result(
     """
     Save both Markdown summary and CSV data into a dated folder under analysis-results/.
 
-    focus: "whole market" or specific industry name (e.g. "Technology", "Semiconductors")
+    focus: "whole market" or specific industry name
     Always intended to be used with top-5 results.
     """
     if date_str is None:
