@@ -42,6 +42,8 @@ def compute_metrics(
         sharpe = float("nan")
     sortino = _sortino(returns)
     max_drawdown = _max_drawdown(curve)
+    # Fraction of up-days for the portfolio. This is not the precision of
+    # individual stock recommendations.
     hit_rate = float((returns > 0).mean()) if len(returns) else float("nan")
     ann_turnover = float(turnover / years) if years > 0 else float("nan")
     return {
