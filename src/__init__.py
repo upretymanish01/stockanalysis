@@ -20,6 +20,7 @@ from .analytics import (
     multi_period_universe,
     plot_multi_period_returns,
     attach_model_predictions,
+    top_5_by_timeframe,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "multi_period_universe",
     "plot_multi_period_returns",
     "attach_model_predictions",
+    "top_5_by_timeframe",
 ]
