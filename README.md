@@ -57,8 +57,14 @@ print(df)
 # Visual comparison
 plot_multi_period_returns(df, title="Big Tech Multi-Period Returns")
 
-# Save result into dated folder
-save_analytics_result(df, title="bigtech-multi-period-returns")
+# Save both Markdown + CSV into dated folder
+# Includes model name and stocks for your analysis viewer
+save_analytics_result(
+    df,
+    title="bigtech-multi-period-returns",
+    model="multi_period_analytics",
+    stocks=tickers,
+)
 ```
 
 ### Other analytics helpers
@@ -73,12 +79,21 @@ a = get_price_analytics("AAPL", period="2y")
 plot_price_and_returns(a)
 ```
 
-## Analysis Results
-Every analysis is saved as a dated Markdown file in `analysis-results/`.
+## Analysis Results (Reusable for Viewer)
+Every analysis run automatically creates **two files** in a dated folder:
 
-**Naming:** `YYYY-MM-DD-short-description.md` (or inside a `YYYY-MM-DD/` folder)
+```
+analysis-results/2026-11-21/
+├── bigtech-multi-period-returns.md   # human summary + metadata
+└── bigtech-multi-period-returns.csv  # clean data for analysis viewer
+```
 
-See `analysis-results/README.md` for the full convention and `analysis-results/_template.md` to start a new result.
+- Markdown contains: model/method used, stocks, summary table, notes
+- CSV contains the raw numbers (easy to load in any viewer or future tool)
+
+This local pair is what you can reuse later to reflect results in the analysis viewer.
+
+See `analysis-results/README.md` for the full convention.
 
 ## Learning notes
 Use the `learning/` folder to keep adding notes as you study.  
