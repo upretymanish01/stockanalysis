@@ -12,6 +12,7 @@ Every analysis run:
 - Includes pattern score, relative strength (vs SPY and sector), volume, Monte Carlo expected return, probability, and 95% VaR
 - Suggests conservative position size (1% risk)
 - Applies earnings growth filter when available
+- Includes current price and 1-year price/return for context
 - Saves both Markdown and CSV
 """
 
@@ -218,6 +219,13 @@ def multi_period_returns(
     fundamentals = _basic_fundamentals(ticker)
     returns = close.pct_change().dropna()
 
+    # 1-year price and return (if enough data)
+    one_year_price = np.nan
+    one_year_return = np.nan
+    if len(close) >= 252:
+        one_year_price = float(close.iloc[-252])
+        one_year_return = float((latest / one_year_price) - 1)
+
     mc_cache = {}
     for d in mc_horizons:
         if d < len(close):
@@ -249,6 +257,9 @@ def multi_period_returns(
             "industry": fundamentals.get("industry"),
             "timeframe": label_map.get(days, f"{days}d"),
             "lookback_days": days,
+            "current_price": float(latest),
+            "one_year_ago_price": one_year_price,
+            "one_year_return_pct": round(one_year_return * 100, 2) if not np.isnan(one_year_return) else np.nan,
             "start_price": float(start_price),
             "end_price": float(latest),
             "actual_return": float(total_ret),
