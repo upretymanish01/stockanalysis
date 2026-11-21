@@ -7,6 +7,7 @@ Includes multi-period comparison so you can capture data once and compare
 2/3/4/5 days, 1 week, 1 month, 3 months, 6 months, and years.
 
 Every analysis run saves both Markdown (human) and CSV (viewer / reuse).
+CSV can include model predictions, noise, and basic fundamentals for validation.
 """
 
 from datetime import datetime
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -51,6 +53,32 @@ def get_price_analytics(ticker: str, period: str = "1y") -> Dict:
     return analytics
 
 
+def _noise_score(close: pd.Series, window: int = 20) -> float:
+    """Simple noise proxy: recent volatility relative to longer-term volatility."""
+    returns = close.pct_change().dropna()
+    if len(returns) < window * 2:
+        return np.nan
+    recent_vol = returns.tail(window).std()
+    longer_vol = returns.std()
+    if longer_vol == 0:
+        return np.nan
+    return float(recent_vol / longer_vol)
+
+
+def _basic_fundamentals(ticker: str) -> Dict:
+    """Pull a few useful fundamentals when available."""
+    try:
+        info = yf.Ticker(ticker).info
+        return {
+            "last_quarter_earnings": info.get("earningsQuarterlyGrowth"),
+            "operating_expenses": info.get("operatingExpense"),
+            "capex": info.get("capitalExpenditures"),
+            "total_revenue": info.get("totalRevenue"),
+        }
+    except Exception:
+        return {}
+
+
 def multi_period_returns(
     ticker: str,
     lookbacks: Optional[List[int]] = None,
@@ -67,13 +95,10 @@ def multi_period_returns(
     - 126 (~6 months)
     - 252 (~1 year)
     - 504 (~2 years)
-
-    Returns a DataFrame with period label, days, start price, end price, total return.
     """
     if lookbacks is None:
-        lookbacks = [2, 3, 4, 5, 5, 21, 63, 126, 252, 504]
+        lookbacks = [2, 3, 4, 5, 21, 63, 126, 252, 504]
 
-    # Label mapping for readability
     label_map = {
         2: "2d", 3: "3d", 4: "4d", 5: "5d / 1w",
         21: "1m", 63: "3m", 126: "6m",
@@ -86,25 +111,36 @@ def multi_period_returns(
 
     close = df["Close"]
     latest = close.iloc[-1]
-    rows = []
+    noise = _noise_score(close)
+    fundamentals = _basic_fundamentals(ticker)
 
+    rows = []
     for days in lookbacks:
         if days >= len(close):
             continue
-        start_price = close.iloc[-days - 1] if days < len(close) else close.iloc[0]
-        # More precise: price from N trading days ago
         start_idx = max(0, len(close) - days - 1)
         start_price = close.iloc[start_idx]
         total_ret = (latest / start_price) - 1
 
         rows.append({
             "ticker": ticker,
-            "period_label": label_map.get(days, f"{days}d"),
+            "timeframe": label_map.get(days, f"{days}d"),
             "lookback_days": days,
             "start_price": float(start_price),
             "end_price": float(latest),
-            "total_return": float(total_ret),
-            "total_return_pct": round(total_ret * 100, 2),
+            "actual_return": float(total_ret),
+            "actual_return_pct": round(total_ret * 100, 2),
+            "noise_score": noise,
+            "last_quarter_earnings": fundamentals.get("last_quarter_earnings"),
+            "operating_expenses": fundamentals.get("operating_expenses"),
+            "capex": fundamentals.get("capex"),
+            "total_revenue": fundamentals.get("total_revenue"),
+            # Model fields (filled later via attach_model_predictions)
+            "model_name": None,
+            "model_expected_return": None,
+            "model_probability": None,
+            "prediction_date": None,
+            "notes": None,
         })
 
     return pd.DataFrame(rows)
@@ -115,14 +151,40 @@ def multi_period_universe(
     lookbacks: Optional[List[int]] = None,
     base_period: str = "2y",
 ) -> pd.DataFrame:
-    """
-    Run multi-period returns for multiple tickers.
-    Easy to compare side-by-side.
-    """
+    """Run multi-period returns for multiple tickers."""
     frames = []
     for t in tickers:
         frames.append(multi_period_returns(t, lookbacks, base_period))
     return pd.concat(frames, ignore_index=True)
+
+
+def attach_model_predictions(
+    df: pd.DataFrame,
+    model_name: str,
+    predictions: Dict[str, Dict],
+    prediction_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Attach model predictions to an existing multi-period DataFrame.
+
+    predictions format example:
+    {
+        "AAPL": {"expected_return": 0.08, "probability": 0.65, "notes": "strong earnings"},
+        "MSFT": {"expected_return": 0.05, "probability": 0.55},
+    }
+    """
+    if prediction_date is None:
+        prediction_date = datetime.now().strftime("%Y-%m-%d")
+
+    df = df.copy()
+    for ticker, pred in predictions.items():
+        mask = df["ticker"] == ticker
+        df.loc[mask, "model_name"] = model_name
+        df.loc[mask, "model_expected_return"] = pred.get("expected_return")
+        df.loc[mask, "model_probability"] = pred.get("probability")
+        df.loc[mask, "prediction_date"] = prediction_date
+        df.loc[mask, "notes"] = pred.get("notes")
+    return df
 
 
 def plot_multi_period_returns(
@@ -130,16 +192,15 @@ def plot_multi_period_returns(
     title: str = "Multi-Period Returns Comparison",
     save_path: Optional[str] = None,
 ):
-    """
-    Bar chart of total returns across periods.
-    Works for single ticker or multiple (grouped).
-    """
+    """Bar chart of actual returns across periods."""
     if df.empty or "error" in df.columns:
         print("No valid data to plot")
         return
 
-    pivot = df.pivot(index="period_label", columns="ticker", values="total_return_pct")
-    # Reorder periods if possible
+    value_col = "actual_return_pct" if "actual_return_pct" in df.columns else "total_return_pct"
+    pivot = df.pivot(index="timeframe" if "timeframe" in df.columns else "period_label",
+                     columns="ticker", values=value_col)
+
     preferred_order = ["2d", "3d", "4d", "5d / 1w", "1m", "3m", "6m", "1y", "2y"]
     existing = [p for p in preferred_order if p in pivot.index]
     if existing:
@@ -147,8 +208,8 @@ def plot_multi_period_returns(
 
     ax = pivot.plot(kind="bar", figsize=(12, 6), width=0.8)
     ax.set_title(title)
-    ax.set_ylabel("Total Return (%)")
-    ax.set_xlabel("Period")
+    ax.set_ylabel("Actual Return (%)")
+    ax.set_xlabel("Timeframe")
     ax.legend(title="Ticker")
     ax.grid(True, axis="y", alpha=0.3)
     plt.xticks(rotation=45, ha="right")
@@ -192,9 +253,7 @@ def plot_price_and_returns(analytics: Dict, save_path: Optional[str] = None):
 
 
 def full_ticker_analytics(ticker: str, period: str = "1y") -> Dict:
-    """
-    Combined price analytics + quality metrics for one ticker.
-    """
+    """Combined price analytics + quality metrics for one ticker."""
     price = get_price_analytics(ticker, period)
     quality = get_quality_metrics(ticker)
 
@@ -208,9 +267,7 @@ def analytics_for_universe(
     tickers: List[str],
     period: str = "1y",
 ) -> pd.DataFrame:
-    """
-    Run full analytics on a list of tickers and return a summary DataFrame.
-    """
+    """Run full analytics on a list of tickers and return a summary DataFrame."""
     rows = []
     for t in tickers:
         try:
@@ -252,8 +309,6 @@ def save_analytics_result(
     Every run produces:
     - YYYY-MM-DD/title.md   (human-readable + metadata)
     - YYYY-MM-DD/title.csv  (machine-readable for analysis viewer)
-
-    Returns dict with paths: {"markdown": ..., "csv": ...}
     """
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -265,15 +320,12 @@ def save_analytics_result(
     md_path = folder / f"{safe_title}.md"
     csv_path = folder / f"{safe_title}.csv"
 
-    # Determine stocks if not provided
     if stocks is None and "ticker" in summary_df.columns:
         stocks = summary_df["ticker"].unique().tolist()
     stocks_str = ", ".join(stocks) if stocks else "N/A"
 
-    # Save CSV first (clean data for viewer)
     summary_df.to_csv(csv_path, index=False)
 
-    # Markdown with metadata
     content = f"""# Analysis Result — {date_str}
 
 **Title:** {title}  
