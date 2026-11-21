@@ -16,6 +16,7 @@ Every analysis run:
 - Saves both Markdown and CSV
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,6 +25,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 from .data_fetcher import fetch_price_history
 from .monte_carlo import estimate_params_from_history, simulate_stock_paths, summarize_terminal_prices
@@ -42,7 +45,8 @@ FOCUS_CATEGORIES = {
     "services": ["CRM", "NOW", "ADBE", "INTU"],
     "tech": ["AAPL", "MSFT", "GOOGL", "AMZN"],
     "banking": ["JPM", "BAC", "WFC", "GS", "MS"],
-    "finance": ["V", "MA", "PYPL", "SQ", "AXP"],
+    # XYZ is Block, Inc. The SQ ticker was retired on 2025-01-21.
+    "finance": ["V", "MA", "PYPL", "XYZ", "AXP"],
     "insurance": ["BRK-B", "PGR", "CB", "MET"],
     "energy": ["XOM", "CVX", "COP"],
     "healthcare": ["JNJ", "UNH", "PFE", "LLY"],
@@ -59,7 +63,9 @@ SECTOR_ETF = {
     "aerospace": "ITA",
     "fashion": "XRT",
     "rockets": "UFO",
-    "education": "EDUT",
+    # EDUT (Global X Education ETF) was liquidated in November 2023.
+    # The education names in FOCUS_CATEGORIES are GICS consumer discretionary.
+    "education": "XLY",
     "services": "XLK",
     "tech": "XLK",
     "banking": "XLF",
@@ -137,11 +143,28 @@ def _relative_strength(ticker: str, benchmark: str = "SPY", period: str = "1y") 
         stock = fetch_price_history(ticker, period=period)
         bench = fetch_price_history(benchmark, period=period)
         if stock.empty or bench.empty:
+            missing = [
+                name
+                for name, frame in ((ticker, stock), (benchmark, bench))
+                if frame is None or frame.empty
+            ]
+            logger.warning(
+                "Relative strength unavailable for %s vs %s; missing price data for %s",
+                ticker,
+                benchmark,
+                ", ".join(missing),
+            )
             return np.nan
         stock_ret = stock["Close"].iloc[-1] / stock["Close"].iloc[0] - 1
         bench_ret = bench["Close"].iloc[-1] / bench["Close"].iloc[0] - 1
         return float(stock_ret - bench_ret)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Relative strength unavailable for %s vs %s: %s",
+            ticker,
+            benchmark,
+            exc,
+        )
         return np.nan
 
 
@@ -166,14 +189,17 @@ def _monte_carlo_for_horizon(close: pd.Series, days: int, n_simulations: int = 5
             "mc_probability_gain": summary["prob_gain"],
             "mc_var_95": summary["var_95"],  # negative number = downside
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("Monte Carlo failed for a %s-day horizon: %s", days, exc)
         return {"mc_expected_return": np.nan, "mc_probability_gain": np.nan, "mc_var_95": np.nan}
 
 
 def _basic_fundamentals(ticker: str) -> Dict:
     """Pull a few useful fundamentals when available."""
     try:
-        info = yf.Ticker(ticker).info
+        info = yf.Ticker(ticker).info or {}
+        if not info:
+            logger.warning("No fundamental data for %s", ticker)
         return {
             "last_quarter_earnings": info.get("earningsQuarterlyGrowth"),
             "operating_expenses": info.get("operatingExpense"),
@@ -182,8 +208,41 @@ def _basic_fundamentals(ticker: str) -> Dict:
             "sector": info.get("sector"),
             "industry": info.get("industry"),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("Fundamental fetch failed for %s: %s", ticker, exc)
         return {}
+
+
+def _suggested_position_pct(
+    var_95: Optional[float],
+    risk_pct: float = 0.01,
+    cap: float = 0.10,
+    var_floor: float = 0.01,
+    fallback_var: float = 0.05,
+) -> float:
+    """Fraction of capital to risk `risk_pct` against a 95% VaR return.
+
+    Missing or non-finite VaR used to fall through `nan > 0` and become a 0%
+    position. Those cases use `fallback_var` (5% downside) instead.
+    """
+    var_abs = None
+    if var_95 is not None:
+        try:
+            value = float(var_95)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if np.isfinite(value) and abs(value) > 0:
+            var_abs = abs(value)
+    if var_abs is None:
+        var_abs = float(fallback_var)
+    return float(min(risk_pct / max(var_abs, var_floor), cap))
+
+
+def _frame_has_no_history(frame: pd.DataFrame) -> bool:
+    """True when a per-ticker result is only an error row."""
+    if frame.empty:
+        return True
+    return "error" in frame.columns and "timeframe" not in frame.columns
 
 
 def multi_period_returns(
@@ -202,10 +261,20 @@ def multi_period_returns(
         252: "1y",
     }
 
-    mc_horizons = {21, 63}
+    # 1m and 3m stay the published forward outlook. Every reported lookback
+    # still needs its own VaR so position size is not left at 0%.
+    outlook_horizons = {21, 63}
+    mc_horizons = set(lookbacks) | outlook_horizons
 
     df = fetch_price_history(ticker, period=base_period)
-    if df.empty or len(df) < max(lookbacks):
+    if df is None or df.empty or len(df) < max(lookbacks):
+        rows = 0 if df is None else len(df)
+        logger.warning(
+            "No usable price history for %s (%d rows; need at least %d)",
+            ticker,
+            rows,
+            max(lookbacks),
+        )
         return pd.DataFrame([{"ticker": ticker, "error": "Insufficient data"}])
 
     close = df["Close"]
@@ -248,12 +317,10 @@ def multi_period_returns(
         risk_adj = float(total_ret / vol) if vol and vol > 0 else np.nan
 
         mc = mc_cache.get(days, {"mc_expected_return": np.nan, "mc_probability_gain": np.nan, "mc_var_95": np.nan})
+        is_outlook = days in outlook_horizons
 
-        # Conservative position size suggestion: risk 1% of capital based on 95% VaR magnitude
-        var_abs = abs(mc.get("mc_var_95", 0.05) or 0.05)
-        suggested_risk_pct = 0.01  # 1% of capital
-        suggested_position_pct = suggested_risk_pct / max(var_abs, 0.01) if var_abs > 0 else 0.0
-        suggested_position_pct = min(suggested_position_pct, 0.10)  # cap at 10% of capital
+        # Risk 1% of capital against this horizon's 95% VaR, capped at 10%.
+        suggested_position_pct = _suggested_position_pct(mc.get("mc_var_95"))
 
         rows.append({
             "ticker": ticker,
@@ -286,10 +353,10 @@ def multi_period_returns(
             "operating_expenses": fundamentals.get("operating_expenses"),
             "capex": fundamentals.get("capex"),
             "total_revenue": fundamentals.get("total_revenue"),
-            "model_name": "monte_carlo_gbm" if days in mc_horizons else None,
-            "model_expected_return": mc["mc_expected_return"],
-            "model_probability": mc["mc_probability_gain"],
-            "prediction_date": datetime.now().strftime("%Y-%m-%d") if days in mc_horizons else None,
+            "model_name": "monte_carlo_gbm" if is_outlook else None,
+            "model_expected_return": mc["mc_expected_return"] if is_outlook else np.nan,
+            "model_probability": mc["mc_probability_gain"] if is_outlook else np.nan,
+            "prediction_date": datetime.now().strftime("%Y-%m-%d") if is_outlook else None,
             "notes": "Risk 1% of capital; position size capped for safety",
         })
 
@@ -304,8 +371,26 @@ def multi_period_universe(
 ) -> pd.DataFrame:
     """Run multi-period returns for multiple tickers."""
     frames = []
+    skipped: List[str] = []
     for t in tickers:
-        frames.append(multi_period_returns(t, lookbacks, base_period, focus=focus))
+        try:
+            frame = multi_period_returns(t, lookbacks, base_period, focus=focus)
+        except Exception as exc:
+            logger.warning("Skipping %s after data fetch failed: %s", t, exc)
+            skipped.append(t)
+            frames.append(pd.DataFrame([{"ticker": t, "error": str(exc)}]))
+            continue
+        if _frame_has_no_history(frame):
+            skipped.append(t)
+        frames.append(frame)
+    if skipped:
+        logger.warning(
+            "Skipped %d ticker(s) due to data fetch failure: %s",
+            len(skipped),
+            ", ".join(skipped),
+        )
+    if not frames:
+        return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
 
@@ -475,10 +560,13 @@ def analytics_for_universe(
 ) -> pd.DataFrame:
     """Run full analytics on a list of tickers and return a summary DataFrame."""
     rows = []
+    skipped: List[str] = []
     for t in tickers:
         try:
             a = full_ticker_analytics(t, period)
             if "error" in a:
+                logger.warning("Skipping %s: %s", t, a["error"])
+                skipped.append(t)
                 rows.append({"ticker": t, "error": a["error"]})
                 continue
             row = {
@@ -496,7 +584,16 @@ def analytics_for_universe(
             }
             rows.append(row)
         except Exception as e:
+            logger.warning("Skipping %s: %s", t, e)
+            skipped.append(t)
             rows.append({"ticker": t, "error": str(e)})
+
+    if skipped:
+        logger.warning(
+            "Skipped %d ticker(s) due to data fetch failure: %s",
+            len(skipped),
+            ", ".join(skipped),
+        )
 
     return pd.DataFrame(rows)
 

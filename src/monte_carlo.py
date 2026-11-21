@@ -35,12 +35,16 @@ def geometric_brownian_motion(
 
     Returns:
         Array of shape (n_simulations, steps + 1) containing price paths
+
+    `mu` is the arithmetic drift of the price SDE, so E[S_T] = S0 * exp(mu * T).
+    The Ito term below is the only -0.5*sigma^2 adjustment; do not also subtract
+    it from a drift estimated as the mean log return.
     """
     if seed is not None:
         np.random.seed(seed)
 
     dt = T / steps
-    # Pre-compute constants
+    # Pre-compute constants. Apply the Ito adjustment exactly once.
     drift = (mu - 0.5 * sigma**2) * dt
     diffusion = sigma * np.sqrt(dt)
 
@@ -146,19 +150,28 @@ def estimate_params_from_history(
     """
     Estimate annualized mu and sigma from historical price series.
 
-    Uses log returns.
+    Uses log returns. `mu` is the arithmetic drift of
+    dS = mu * S * dt + sigma * S * dW, which is what
+    `geometric_brownian_motion` expects. The mean log return is lower by
+    0.5 * sigma^2; that Ito term is added back here so the simulator does
+    not apply it a second time.
+
+    `mu_daily` remains the mean daily log return (not mu / 252).
+    `mu_log` is that mean annualized.
     """
     log_returns = np.log(prices / prices.shift(1)).dropna()
-    mu_daily = log_returns.mean()
-    sigma_daily = log_returns.std()
+    mu_log_daily = float(log_returns.mean())
+    sigma_daily = float(log_returns.std())  # sample std, ddof=1
 
-    mu = mu_daily * trading_days_per_year
     sigma = sigma_daily * np.sqrt(trading_days_per_year)
+    mu_log = mu_log_daily * trading_days_per_year
+    mu = mu_log + 0.5 * sigma**2
 
     return {
         "mu": float(mu),
+        "mu_log": float(mu_log),
         "sigma": float(sigma),
-        "mu_daily": float(mu_daily),
+        "mu_daily": float(mu_log_daily),
         "sigma_daily": float(sigma_daily),
         "n_observations": int(len(log_returns)),
     }
