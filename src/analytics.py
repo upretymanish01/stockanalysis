@@ -5,6 +5,8 @@ Designed so results can be easily saved into analysis-results/ dated folders.
 
 Includes multi-period comparison so you can capture data once and compare
 2/3/4/5 days, 1 week, 1 month, 3 months, 6 months, and years.
+
+Every analysis run saves both Markdown (human) and CSV (viewer / reuse).
 """
 
 from datetime import datetime
@@ -239,13 +241,19 @@ def analytics_for_universe(
 def save_analytics_result(
     summary_df: pd.DataFrame,
     title: str,
+    model: str = "multi_period_analytics",
+    stocks: Optional[List[str]] = None,
     date_str: Optional[str] = None,
     notes: str = "",
-) -> str:
+) -> Dict[str, str]:
     """
-    Save a Markdown analysis result into a dated folder under analysis-results/.
+    Save both Markdown summary and CSV data into a dated folder under analysis-results/.
 
-    Returns the path of the created file.
+    Every run produces:
+    - YYYY-MM-DD/title.md   (human-readable + metadata)
+    - YYYY-MM-DD/title.csv  (machine-readable for analysis viewer)
+
+    Returns dict with paths: {"markdown": ..., "csv": ...}
     """
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -254,12 +262,25 @@ def save_analytics_result(
     folder.mkdir(parents=True, exist_ok=True)
 
     safe_title = title.lower().replace(" ", "-").replace("/", "-")
-    filepath = folder / f"{safe_title}.md"
+    md_path = folder / f"{safe_title}.md"
+    csv_path = folder / f"{safe_title}.csv"
 
+    # Determine stocks if not provided
+    if stocks is None and "ticker" in summary_df.columns:
+        stocks = summary_df["ticker"].unique().tolist()
+    stocks_str = ", ".join(stocks) if stocks else "N/A"
+
+    # Save CSV first (clean data for viewer)
+    summary_df.to_csv(csv_path, index=False)
+
+    # Markdown with metadata
     content = f"""# Analysis Result — {date_str}
 
 **Title:** {title}  
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  
+**Model / Method:** {model}  
+**Stocks:** {stocks_str}  
+**CSV data:** `{csv_path.name}`  
 
 ## Summary Table
 
@@ -268,11 +289,13 @@ def save_analytics_result(
 ## Notes
 {notes}
 
-## Raw DataFrame (CSV-style)
-```
-{summary_df.to_csv(index=False)}
-```
+## Files
+- Markdown: `{md_path.name}`
+- CSV: `{csv_path.name}` (use this for the analysis viewer)
 """
-    filepath.write_text(content)
-    print(f"Saved analytics result to {filepath}")
-    return str(filepath)
+    md_path.write_text(content)
+
+    print(f"Saved Markdown: {md_path}")
+    print(f"Saved CSV:      {csv_path}")
+
+    return {"markdown": str(md_path), "csv": str(csv_path)}
