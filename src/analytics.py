@@ -12,7 +12,7 @@ Every analysis run:
 - Includes pattern score, relative strength (vs SPY and sector), volume, Monte Carlo expected return, probability, and 95% VaR
 - Suggests conservative position size (1% risk)
 - Applies earnings growth filter when available
-- Includes current price and 1-year price/return for context
+- Includes current price, 1-year price/return, and next 3-month expected return
 - Saves both Markdown and CSV
 """
 
@@ -231,6 +231,9 @@ def multi_period_returns(
         if d < len(close):
             mc_cache[d] = _monte_carlo_for_horizon(close, d)
 
+    # Always compute next 3-month outlook (63 trading days)
+    next_3m = mc_cache.get(63, {"mc_expected_return": np.nan, "mc_probability_gain": np.nan})
+
     rows = []
     for days in lookbacks:
         if days >= len(close):
@@ -260,6 +263,8 @@ def multi_period_returns(
             "current_price": float(latest),
             "one_year_ago_price": one_year_price,
             "one_year_return_pct": round(one_year_return * 100, 2) if not np.isnan(one_year_return) else np.nan,
+            "next_3m_expected_return": next_3m["mc_expected_return"],
+            "next_3m_probability_gain": next_3m["mc_probability_gain"],
             "start_price": float(start_price),
             "end_price": float(latest),
             "actual_return": float(total_ret),
