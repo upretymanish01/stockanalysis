@@ -6,8 +6,10 @@ Designed so results can be easily saved into analysis-results/ dated folders.
 Includes multi-period comparison so you can capture data once and compare
 2/3/4/5 days, 1 week, 1 month, 3 months, 6 months, and years.
 
-Every analysis run saves both Markdown (human) and CSV (viewer / reuse).
-CSV can include model predictions, noise, and basic fundamentals for validation.
+Every analysis run:
+- Records focus (industry or whole market)
+- Returns only the top 5 by ranking
+- Saves both Markdown and CSV
 """
 
 from datetime import datetime
@@ -24,11 +26,7 @@ from .quality_screen import get_quality_metrics
 
 
 def get_price_analytics(ticker: str, period: str = "1y") -> Dict:
-    """
-    Fetch price history and compute key analytics.
-
-    Returns dictionary with summary stats and the full DataFrame.
-    """
+    """Fetch price history and compute key analytics."""
     df = fetch_price_history(ticker, period=period)
     if df.empty:
         return {"ticker": ticker, "error": "No data"}
@@ -74,6 +72,8 @@ def _basic_fundamentals(ticker: str) -> Dict:
             "operating_expenses": info.get("operatingExpense"),
             "capex": info.get("capitalExpenditures"),
             "total_revenue": info.get("totalRevenue"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
         }
     except Exception:
         return {}
@@ -84,18 +84,7 @@ def multi_period_returns(
     lookbacks: Optional[List[int]] = None,
     base_period: str = "2y",
 ) -> pd.DataFrame:
-    """
-    Capture price data once, then compute total returns over multiple lookback windows.
-
-    Default lookbacks (trading days):
-    - 2, 3, 4, 5 days
-    - 5 (~1 week)
-    - 21 (~1 month)
-    - 63 (~3 months)
-    - 126 (~6 months)
-    - 252 (~1 year)
-    - 504 (~2 years)
-    """
+    """Capture price data once, then compute total returns over multiple lookback windows."""
     if lookbacks is None:
         lookbacks = [2, 3, 4, 5, 21, 63, 126, 252, 504]
 
@@ -124,6 +113,8 @@ def multi_period_returns(
 
         rows.append({
             "ticker": ticker,
+            "sector": fundamentals.get("sector"),
+            "industry": fundamentals.get("industry"),
             "timeframe": label_map.get(days, f"{days}d"),
             "lookback_days": days,
             "start_price": float(start_price),
@@ -135,7 +126,6 @@ def multi_period_returns(
             "operating_expenses": fundamentals.get("operating_expenses"),
             "capex": fundamentals.get("capex"),
             "total_revenue": fundamentals.get("total_revenue"),
-            # Model fields (filled later via attach_model_predictions)
             "model_name": None,
             "model_expected_return": None,
             "model_probability": None,
@@ -158,21 +148,33 @@ def multi_period_universe(
     return pd.concat(frames, ignore_index=True)
 
 
+def top_5_by_timeframe(
+    df: pd.DataFrame,
+    timeframe: str = "1m",
+    rank_by: str = "actual_return_pct",
+) -> pd.DataFrame:
+    """
+    Return only the top 5 tickers for a given timeframe.
+    Default ranking is by actual_return_pct (highest first).
+    """
+    if df.empty or "timeframe" not in df.columns:
+        return df
+
+    subset = df[df["timeframe"] == timeframe].copy()
+    if subset.empty:
+        return subset
+
+    subset = subset.sort_values(rank_by, ascending=False, na_position="last")
+    return subset.head(5).reset_index(drop=True)
+
+
 def attach_model_predictions(
     df: pd.DataFrame,
     model_name: str,
     predictions: Dict[str, Dict],
     prediction_date: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Attach model predictions to an existing multi-period DataFrame.
-
-    predictions format example:
-    {
-        "AAPL": {"expected_return": 0.08, "probability": 0.65, "notes": "strong earnings"},
-        "MSFT": {"expected_return": 0.05, "probability": 0.55},
-    }
-    """
+    """Attach model predictions to an existing multi-period DataFrame."""
     if prediction_date is None:
         prediction_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -298,6 +300,7 @@ def analytics_for_universe(
 def save_analytics_result(
     summary_df: pd.DataFrame,
     title: str,
+    focus: str = "whole market",
     model: str = "multi_period_analytics",
     stocks: Optional[List[str]] = None,
     date_str: Optional[str] = None,
@@ -306,9 +309,8 @@ def save_analytics_result(
     """
     Save both Markdown summary and CSV data into a dated folder under analysis-results/.
 
-    Every run produces:
-    - YYYY-MM-DD/title.md   (human-readable + metadata)
-    - YYYY-MM-DD/title.csv  (machine-readable for analysis viewer)
+    focus: "whole market" or specific industry name (e.g. "Technology", "Semiconductors")
+    Always intended to be used with top-5 results.
     """
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -330,11 +332,12 @@ def save_analytics_result(
 
 **Title:** {title}  
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  
+**Focus:** {focus}  
 **Model / Method:** {model}  
-**Stocks:** {stocks_str}  
+**Top stocks:** {stocks_str}  
 **CSV data:** `{csv_path.name}`  
 
-## Summary Table
+## Summary Table (Top 5)
 
 {summary_df.to_markdown(index=False) if hasattr(summary_df, 'to_markdown') else summary_df.to_string()}
 
