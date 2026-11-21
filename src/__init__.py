@@ -24,6 +24,7 @@ from .analytics import (
     get_tickers_for_focus,
     FOCUS_CATEGORIES,
 )
+from .backtest import SURVIVORSHIP_CAVEAT, compare_strategies, run_backtest
 
 __all__ = [
     "geometric_brownian_motion",
@@ -47,4 +48,7 @@ __all__ = [
     "top_5_by_timeframe",
     "get_tickers_for_focus",
     "FOCUS_CATEGORIES",
+    "SURVIVORSHIP_CAVEAT",
+    "compare_strategies",
+    "run_backtest",
 ]

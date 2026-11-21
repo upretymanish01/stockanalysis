@@ -162,6 +162,69 @@ Key functions:
 - `summarize_terminal_prices(...)` — mean, percentiles, VaR, CVaR, probability of loss
 - `estimate_params_from_history(...)` — annualized μ and σ from a price series
 
+## Backtesting
+
+`src/backtest` tests whether a selection rule would have made money on daily bars.
+
+- A signal may use only data available at the **close of day t**.
+- The order fills at the **next session's open**.
+- Commission and slippage are set in basis points of traded notional.
+- Rebalance with `--rebalance daily`, `weekly`, or `monthly`.
+- Strategies in the comparison:
+  - **top_n** — the repo's top-5-per-theme composite (risk-adjusted return, pattern score, relative strength vs SPY and the theme ETF), equal-weighted
+  - **momentum_equal** / **momentum_vol** — 12-1 momentum, long only if momentum is positive and price is above the 200-day average; equal weight or inverse-volatility sized with a 15% volatility cap
+  - **buy_hold_SPY** and **buy_hold_\<theme ETF\>** — the ETF map in `SECTOR_ETF`
+- `--oos-start` or `--walk-forward` tunes momentum's lookback on the train window and reports **out-of-sample** rows as the performance record. A run with neither flag is labeled `sample=full` and is not a holdout.
+
+```bash
+python -m src.backtest \
+  --themes tech,finance,healthcare \
+  --start 2018-01-01 \
+  --end 2026-11-21 \
+  --rebalance monthly \
+  --commission-bps 1 \
+  --slippage-bps 5 \
+  --oos-start 2022-01-01 \
+  --output output/backtest
+```
+
+Walk-forward (non-overlapping 126-session test windows after 504 in-sample sessions):
+
+```bash
+python -m src.backtest \
+  --themes tech,finance,healthcare \
+  --start 2016-01-01 \
+  --rebalance monthly \
+  --walk-forward \
+  --train-days 504 \
+  --test-days 126 \
+  --output output/backtest-wf
+```
+
+The command writes `summary.csv`, `summary.md`, and `equity_curve.png`. Pass `--prices bars.csv` (columns `date,ticker,open,close,volume`) to run from a file instead of Yahoo Finance.
+
+From Python:
+
+```python
+from src.backtest import compare_strategies
+from src.backtest.engine import BacktestConfig
+from src.backtest.panel import load_yahoo_panel
+from src.analytics import FOCUS_CATEGORIES, SECTOR_ETF
+
+tickers = ["SPY", "XLK", *FOCUS_CATEGORIES["tech"]]
+panel, skipped = load_yahoo_panel(tickers, start="2018-01-01", end="2026-11-21")
+comparison = compare_strategies(
+    panel,
+    {"tech": FOCUS_CATEGORIES["tech"]},
+    config=BacktestConfig(rebalance="monthly", commission_bps=1, slippage_bps=5),
+    sector_etfs=SECTOR_ETF,
+    oos_start="2022-01-01",
+)
+print(comparison.summary)
+```
+
+**Survivorship bias.** The theme lists are today's listed names. Yahoo Finance does not put delisted, acquired, or bankrupt companies back into those lists, and a renamed ticker may not include the old symbol's history. A backtest on this universe is biased upward versus a point-in-time membership list. The live screener's earnings-growth filter is also omitted unless you pass a point-in-time earnings series, because `yfinance` `.info` is the current snapshot rather than the number known on each decision date. Those limits are repeated in every report the CLI writes.
+
 ## Getting Started
 ```bash
 git clone https://github.com/upretymanish01/stockanalysis.git
